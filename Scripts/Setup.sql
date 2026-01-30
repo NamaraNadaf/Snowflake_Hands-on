@@ -1,0 +1,71 @@
+
+/****************************************************************/
+/*Loading file having structured and semi-structure data from   */
+/*Amazon S3 file into table and pereform CDC                    */
+/* To explore batch loading and CDC                             */
+
+--Create new database , schema and warehouse
+USE ROLE SYSADMIN;
+
+CREATE OR REPLACE DATABASE DB_DEV_N01;
+CREATE OR REPLACE DATABASE DB_DA_N01;
+
+
+CREATE OR REPLACE SCHEMA DB_DEV_N01.SCH_DEV_N01; -- for development
+CREATE OR REPLACE SCHEMA DB_DA_N01.SCH_DA_N01; -- for analysis 
+
+CREATE OR REPLACE WAREHOUSE WH_DEV_N01
+    WAREHOUSE_SIZE = 'XSMALL' 
+    WAREHOUSE_TYPE = 'standard'
+    AUTO_SUSPEND = 120
+    AUTO_RESUME = TRUE
+    INITIALLY_SUSPENDED = TRUE
+COMMENT = 'This is warehouse created for DEVELOPMENT';
+
+--Create role
+USE role SECURITYADMIN;
+
+CREATE OR REPLACE ROLE SF_Data_Engineer
+COMMENT='This is main role under which dev and analyst roles will be created';
+
+CREATE  ROLE IF NOT EXISTS SF_DEV_N01
+COMMENT='This role is for development activities';
+
+CREATE OR REPLACE ROLE SF_DA_N01
+COMMENT='This role is for DATA ANALYSIS activities';
+
+USE ROLE securityadmin;
+-- role hierarchy
+GRANT ROLE SF_Data_Engineer TO ROLE sysadmin;
+GRANT ROLE SF_DEV_N01 TO ROLE SF_Data_Engineer;
+GRANT ROLE SF_DA_N01 TO ROLE SF_Data_Engineer;
+
+-- privilege grants
+GRANT USAGE ON DATABASE DB_DEV_N01 TO ROLE SF_Data_Engineer;
+GRANT USAGE ON DATABASE DB_DA_N01 TO ROLE SF_Data_Engineer;
+
+GRANT USAGE ON DATABASE DB_DEV_N01 TO ROLE SF_DEV_N01;
+GRANT USAGE ON DATABASE DB_DA_N01 TO ROLE SF_DA_N01;
+
+
+GRANT USAGE ON ALL SCHEMAS IN DATABASE DB_DEV_N01 TO ROLE SF_Data_Engineer;
+GRANT USAGE ON ALL SCHEMAS IN DATABASE DB_DA_N01 TO ROLE SF_Data_Engineer;
+
+GRANT USAGE ON ALL SCHEMAS IN DATABASE DB_DEV_N01 TO ROLE SF_DEV_N01;
+GRANT USAGE ON ALL SCHEMAS IN DATABASE DB_DA_N01 TO ROLE SF_DA_N01;
+
+GRANT ALL ON SCHEMA DB_DEV_N01.SCH_DEV_N01 TO ROLE SF_DEV_N01;
+GRANT ALL ON SCHEMA DB_DA_N01.SCH_DA_N01 TO ROLE SF_DA_N01;
+
+-- Warehouse grants
+USE ROLE accountadmin;
+GRANT ALL ON WAREHOUSE WH_DEV_N01 TO ROLE SF_Data_Engineer;
+
+-- future grants
+GRANT ALL ON FUTURE TABLES IN SCHEMA DB_DEV_N01.SCH_DEV_N01 TO ROLE SF_Data_Engineer;
+GRANT ALL ON FUTURE TABLES IN SCHEMA DB_DA_N01.SCH_DA_N01 TO ROLE SF_Data_Engineer;
+
+GRANT ALL ON FUTURE TABLES IN SCHEMA DB_DEV_N01.SCH_DEV_N01 TO ROLE SF_DEV_N01;
+GRANT ALL ON FUTURE TABLES IN SCHEMA DB_DA_N01.SCH_DA_N01 TO ROLE SF_DA_N01;
+
+
