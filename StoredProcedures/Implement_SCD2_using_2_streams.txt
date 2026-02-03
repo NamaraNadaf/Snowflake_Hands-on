@@ -1,0 +1,154 @@
+-- SCD Type-II implementation using 2  Streams
+-----------------------------------------
+
+CREATE DATABASE IF NOT EXISTS EMP;
+
+CREATE SCHEMA IF NOT EXISTS STAGING;
+CREATE SCHEMA IF NOT EXISTS TARGET;
+
+-- Create a stage table
+CREATE TABLE STAGING.STG_EMPL
+( eid INTEGER not null,
+  ename VARCHAR(30),
+  dob DATE,
+  mail VARCHAR(50),
+  phone VARCHAR(20),
+  salary INTEGER,
+  dept VARCHAR(30),
+  loc VARCHAR(20),
+  PRIMARY KEY(eid)
+);
+
+-- Create the target table
+CREATE TABLE TARGET.EMPL_SCD2
+( emp_id INTEGER not null,
+  emp_name VARCHAR(50),
+  date_of_birth DATE,
+  email_id VARCHAR(50),
+  phone_number VARCHAR(20),
+  salary INTEGER,
+  department VARCHAR(30),
+  work_location VARCHAR(30),
+  effective_datetime TIMESTAMP,
+  expiry_datetime TIMESTAMP,
+  PRIMARY KEY(emp_id, effective_datetime)
+);
+
+-- Snowflake does NOT allow INSERT inside a WHEN MATCHED clause.
+-- WHEN MATCHED THEN INSERT is illegal syntax in Snowflake.
+-- Only these are allowed:
+-- ✔ WHEN MATCHED THEN UPDATE
+-- ✔ WHEN MATCHED THEN DELETE
+-- ✔ WHEN NOT MATCHED THEN INSERT
+ -- Therefore, create 2 streams to capture update and to insert new/updated records
+ 
+-- Create a stream on stage table
+CREATE or replace  STREAM STAGING.STREAM_STG_EMPL_Update ON TABLE STAGING.STG_EMPL;
+CREATE or replace  STREAM STAGING.STREAM_STG_EMPL_Insert ON TABLE STAGING.STG_EMPL;
+
+-- Create a prcedure to implement Type II logic
+CREATE OR REPLACE PROCEDURE EMP.TARGET.PROC_EMPL_SCD_TPYE2()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS CALLER
+AS
+
+DECLARE 
+	cur_ts TIMESTAMP;
+	
+BEGIN
+	cur_ts := CURRENT_TIMESTAMP();
+
+	--Expire old records and insert new records
+	MERGE INTO TARGET.EMPL_SCD2 TGT
+	USING STAGING.STREAM_STG_EMPL_Update STR
+	ON TGT.emp_id = STR.eid
+	AND TGT.expiry_datetime is NULL
+
+ 	WHEN MATCHED
+	  AND STR.METADATA$ACTION = 'DELETE'
+	  AND STR.METADATA$ISUPDATE = 'TRUE'
+	THEN
+	  UPDATE SET TGT.expiry_datetime = :cur_ts
+      
+    WHEN NOT MATCHED THEN
+	  INSERT(emp_id, emp_name, date_of_birth, email_id, phone_number, salary, department, work_location, effective_datetime, expiry_datetime)
+	  VALUES(STR.eid, STR.ename, STR.dob, STR.mail, STR.phone, STR.salary, STR.dept, STR.loc, :cur_ts, null)
+	;
+
+--Insert the new version of old records
+	INSERT INTO TARGET.EMPL_SCD2
+	(emp_id, emp_name, date_of_birth, email_id, phone_number, salary, department, work_location, effective_datetime, expiry_datetime)
+	SELECT eid, ename, dob, mail, phone, salary, dept, loc, :cur_ts, null
+	FROM STAGING.STREAM_STG_EMPL_Insert
+	WHERE METADATA$ACTION = 'INSERT'
+	  AND METADATA$ISUPDATE = 'TRUE'
+	;
+    
+	RETURN 'Procedure Completed Successfully';
+	
+END;
+
+
+
+---Testing
+INSERT INTO STAGING.STG_EMPL VALUES
+(1, 'Rahul Sharma', '1986-04-15', 'rahul.sharma@gmail.com','9988776655', 92000, 'Administration', 'Bangalore'),
+(2, 'Renuka Devi', '1993-10-19', 'renuka1993@yahoo.com','+91 9911882255', 61000, 'Sales', 'Hyderabad'),
+(3, 'Kamalesh', '1991-02-08', 'kamal91@outlook.com','9182736450', 59000, 'Sales', 'Chennai'),
+(4, 'Arun Kumar', '1989-05-20', 'arun_kumar@gmail.com','901-287-3465', 74500, 'IT', 'Bangalore');
+
+SELECT * FROM STAGING.STREAM_STG_EMPL_Update;
+SELECT * FROM STAGING.STREAM_STG_EMPL_Insert;
+
+-- EID	ENAME	DOB	MAIL	PHONE	SALARY	DEPT	LOC	METADATA$ACTION	METADATA$ISUPDATE	METADATA$ROW_ID
+-- 1	Rahul Sharma	1986-04-15	rahul.sharma@gmail.com	9988776655	92000	Administration	Bangalore	INSERT	false	bbe726ac53ae5e0f63f8665f3c4d0dc29ad4a743
+-- 2	Renuka Devi	1993-10-19	renuka1993@yahoo.com	+91 9911882255	61000	Sales	Hyderabad	INSERT	false	987d8b85d900be85a41f2079cd6e92ead90cf2e1
+-- 3	Kamalesh	1991-02-08	kamal91@outlook.com	9182736450	59000	Sales	Chennai	INSERT	false	6bc270202dd86660254cd834a77bf2f00733c4ab
+-- 4	Arun Kumar	1989-05-20	arun_kumar@gmail.com	901-287-3465	74500	IT	Bangalore	INSERT	false	61ef1cd8fa797b2f120e51d5bdf33fa64775797a
+
+    select * from TARGET.EMPL_SCD2;
+
+
+CALL EMP.TARGET.PROC_EMPL_SCD_TPYE2()
+
+
+    select * from TARGET.EMPL_SCD2;
+-- EMP_ID,EMP_NAME,DATE_OF_BIRTH,EMAIL_ID,PHONE_NUMBER,SALARY,DEPARTMENT,WORK_LOCATION,EFFECTIVE_DATETIME,EXPIRY_DATETIME
+-- 1,Rahul Sharma,1986-04-15,rahul.sharma@gmail.com,9988776655,92000,Administration,Bangalore,2026-02-03 04:18:23.718,
+-- 2,Renuka Devi,1993-10-19,renuka1993@yahoo.com,+91 9911882255,61000,Sales,Hyderabad,2026-02-03 04:18:23.718,
+-- 3,Kamalesh,1991-02-08,kamal91@outlook.com,9182736450,59000,Sales,Chennai,2026-02-03 04:18:23.718,
+-- 4,Arun Kumar,1989-05-20,arun_kumar@gmail.com,901-287-3465,74500,IT,Bangalore,2026-02-03 04:18:23.718,
+    
+    UPDATE STAGING.STG_EMPL SET phone = '9911882255' WHERE eid = 2;
+
+   INSERT INTO STAGING.STG_EMPL VALUES
+(6, 'Venkatesh D', '1992-01-27', 'dvenkat92@gmail.com', '8921764305', 63500, 'IT', 'Chennai');
+
+SELECT * FROM STAGING.STREAM_STG_EMPL_Update order by 1;
+SELECT * FROM STAGING.STREAM_STG_EMPL_Insert order by 1;
+
+
+CALL EMP.TARGET.PROC_EMPL_SCD_TPYE2()
+
+select * from TARGET.EMPL_SCD2 order by 1;
+-- EMP_ID,EMP_NAME,DATE_OF_BIRTH,EMAIL_ID,PHONE_NUMBER,SALARY,DEPARTMENT,WORK_LOCATION,EFFECTIVE_DATETIME,EXPIRY_DATETIME
+-- 1,Rahul Sharma,1986-04-15,rahul.sharma@gmail.com,9988776655,92000,Administration,Bangalore,2026-02-03 04:18:23.718,
+-- 2,Renuka Devi,1993-10-19,renuka1993@yahoo.com,+91 9911882255,61000,Sales,Hyderabad,2026-02-03 04:18:23.718,2026-02-03 04:20:05.125 -- closed  row
+-- 2,Renuka Devi,1993-10-19,renuka1993@yahoo.com,9911882255,61000,Sales,Hyderabad,2026-02-03 04:20:05.125,                            -- updated  row
+-- 3,Kamalesh,1991-02-08,kamal91@outlook.com,9182736450,59000,Sales,Chennai,2026-02-03 04:18:23.718,
+-- 4,Arun Kumar,1989-05-20,arun_kumar@gmail.com,901-287-3465,74500,IT,Bangalore,2026-02-03 04:18:23.718,
+-- 6,Venkatesh D,1992-01-27,dvenkat92@gmail.com,8921764305,63500,IT,Chennai,2026-02-03 04:20:05.125,   --newly inserted row
+
+
+
+-- Schedule the procedure 
+CREATE OR REPLACE TASK TARGET.TASK_EMPL_DATA_LOAD2
+    SCHEDULE = '2 MINUTES'
+    WHEN SYSTEM$STREAM_HAS_DATA('STAGING.STREAM_STG_EMPL_U')
+AS
+CALL EMP.TARGET.PROC_EMPL_SCD_TPYE2()
+;
+
+// Start the task
+ALTER TASK TARGET.TASK_EMPL_DATA_LOAD2 RESUME;
