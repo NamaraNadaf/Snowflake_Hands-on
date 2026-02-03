@@ -1,0 +1,206 @@
+--Set Context
+USE ROLE SF_DEV_N01;
+USE WAREHOUSE WH_DEV_N01;
+USE DATABASE DB_DEV_N01;
+USE SCHEMA DB_DEV_N01.SCH_DEV_N01;
+
+
+--Check file in AWS S3
+create or replace stage AWS_STG
+URL = 's3://sfquickstarts/frostbyte_tastybytes/raw_pos/menu/'
+comment='This stage points to AWS S3 public bucket having file';
+
+--Check files in stage
+List @AWS_STG;
+-- File present:  s3://sfquickstarts/frostbyte_tastybytes/raw_pos/menu/menu.csv.gz
+
+--We are not sure about files content, check the schema and data in file
+--Create file format to read entire line as a single column
+
+CREATE OR REPLACE FILE FORMAT ff_no_delim
+TYPE = 'CSV'
+FIELD_DELIMITER = 'NONE'
+SKIP_HEADER = 0;
+
+SELECT $1
+FROM @aws_stg/ (FILE_FORMAT => 'FF_NO_DELIM')
+LIMIT 20;
+
+--We can analyze the data and identified that file is comma delimeited and have JSON in one of the field
+/*** SAMPLE DATA FROM FILE
+10001,1,Ice Cream,Freezing Point,10,Lemonade,Beverage,Cold Option,0.6500,3.5000,{"menu_item_health_metrics":[{"ingredients":["Lemons"\,"Sugar"\,"Water"]\,"is_dairy_free_flag":"Y"\,"is_gluten_free_flag":"Y"\,"is_healthy_flag":"N"\,"is_nut_free_flag":"Y"}]\,"menu_item_id":10}
+-- 10002,1,Ice Cream,Freezing Point,11,Sugar Cone,Dessert,Cold Option,2.5000,6.0000,{"menu_item_health_metrics":[{"ingredients":["One Scoop"\,"Sugar Cone"]\,"is_dairy_free_flag":"Y"\,"is_gluten_free_flag":"Y"\,"is_healthy_flag":"N"\,"is_nut_free_flag":"Y"}]\,"menu_item_id":11}
+*/
+--We can create raw table using infer_schema to get the data into table
+
+-- 1. Create file format for csv type data
+
+CREATE OR REPLACE FILE FORMAT CSVTYPE
+TYPE=CSV
+FIELD_DELIMITER=',',
+RECORD_DELIMITER='\n',
+PARSE_HEADER=FALSE,
+--FIELD_OPTIONALLY_ENCLOSED_BY='"'
+ENCODING='UTF8';
+
+
+CREATE OR REPLACE TEMP TABLE MENU_TEMP
+USING TEMPLATE(
+SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
+FROM TABLE(
+INFER_SCHEMA(
+LOCATION=> '@AWS_STG/',
+FILE_FORMAT=> 'CSVTYPE',
+IGNORE_CASE=>TRUE
+)));
+
+DESC TABLE  DB_DEV_N01.SCH_DEV_N01.MENU_TEMP;
+
+SELECT COUNT(*) FROM MENU_TEMP;
+--TABLE CREATED BUT NO DATA
+
+SELECT GET_DDL('table',  'MENU_TEMP');
+/*
+create or replace TEMPORARY TABLE MENU_TEMP (
+	C1 NUMBER(5,0),
+	C2 NUMBER(2,0),
+	C3 VARCHAR(16777216),
+	C4 VARCHAR(16777216),
+	C5 NUMBER(3,0),
+	C6 VARCHAR(16777216),
+	C7 VARCHAR(16777216),
+	C8 VARCHAR(16777216),
+	C9 NUMBER(6,4),
+	C10 NUMBER(6,4),
+	C11 VARCHAR(16777216)
+);
+);
+*/
+
+--WE CAN COMPARE THE COLUMN DATAYPE WITH DATA AND UPDATE COLUMN NAMES ACCORDINGLY
+
+CREATE OR REPLACE TABLE menu_staging
+(
+    menu_id NUMBER(19,0),
+    menu_type_id NUMBER(38,0),
+    menu_type VARCHAR(16777216),
+    truck_brand_name VARCHAR(16777216),
+    menu_item_id NUMBER(38,0),
+    menu_item_name VARCHAR(16777216),
+    item_category VARCHAR(16777216),
+    item_subcategory VARCHAR(16777216),
+    cost_of_goods_usd NUMBER(38,4),
+    sale_price_usd NUMBER(38,4),
+    menu_item_health_metrics_obj VARIANT
+);
+
+SELECT GET_DDL('table',  'MENU_STAGING');
+--LOAD THE DATA FROM STAGE INTO TABLE
+COPY INTO MENU_STAGING
+FROM @AWS_STG
+FILE_FORMAT='CSVTYPE'
+
+SELECT COUNT(*) FROM MENU_STAGING;
+--THERE ARE 100 ROWS GOT LOADED
+
+
+/***********************************************************************/
+/*CREATE TABLE BY ANALYZING THE DATA **********************************/
+/***********************************************************************/
+
+SELECT * FROM MENU_STAGING;
+
+SELECT * FROM MENU_STAGING
+WHERE MENU_ID=10001;
+/*
+{
+  "menu_item_health_metrics": [
+    {
+      "ingredients": [
+        "Lemons",
+        "Sugar",
+        "Water"
+      ],
+      "is_dairy_free_flag": "Y",
+      "is_gluten_free_flag": "Y",
+      "is_healthy_flag": "N",
+      "is_nut_free_flag": "Y"
+    }
+  ],
+  "menu_item_id": 10
+}
+*/
+
+--CONVERT THE JSON DATA OF COLUMN menu_item_health_metrics_obj INTO STRUCTURED FORMAT
+
+select 
+m.* EXCLUDE (menu_item_health_metrics_obj),
+j.value::string as ingredient
+from
+MENU_STAGING m,
+LATERAL FLATTEN(input=>m.menu_item_health_metrics_obj:menu_item_health_metrics , recursive=>true) i,
+LATERAL FLATTEN(input=>i.value:ingredients, recursive=>true) j,
+WHERE m.MENU_ID=10001;
+/*
+10001	1	Ice Cream	Freezing Point	10	Lemonade	Beverage	Cold Option	0.6500	3.5000	Lemons
+10001	1	Ice Cream	Freezing Point	10	Lemonade	Beverage	Cold Option	0.6500	3.5000	Sugar
+10001	1	Ice Cream	Freezing Point	10	Lemonade	Beverage	Cold Option	0.6500	3.5000	Water
+*/
+
+select 
+m.* EXCLUDE (menu_item_health_metrics_obj),
+f.value:ingredients:: array as ingredients,
+f.value:is_dairy_free_flag::string as is_dairy_free_flag,
+f.value:is_gluten_free_flag::string as is_gluten_free_flag,
+f.value:is_healthy_flag::string as is_healthy_flag,
+f.value:is_nut_free_flag::string as is_nut_free_flag
+from
+MENU_STAGING m,
+LATERAL FLATTEN(input=>m.menu_item_health_metrics_obj:menu_item_health_metrics 
+-- ,MODE => 'ARRAY'
+-- ,RECURSIVE => TRUE
+) f
+WHERE m.MENU_ID=10001 
+/*
+MENU_ID,MENU_TYPE_ID,MENU_TYPE,TRUCK_BRAND_NAME,MENU_ITEM_ID,MENU_ITEM_NAME,ITEM_CATEGORY,ITEM_SUBCATEGORY,COST_OF_GOODS_USD,SALE_PRICE_USD,INGREDIENTS,IS_DAIRY_FREE_FLAG,IS_GLUTEN_FREE_FLAG,IS_HEALTHY_FLAG,IS_NUT_FREE_FLAG
+10001,1,Ice Cream,Freezing Point,10,Lemonade,Beverage,Cold Option,0.6500,3.5000,"[  ""Lemons"",  ""Sugar"",  ""Water""]",Y,Y,N,Y
+*/
+
+
+
+--create table using above select to have transformed data
+create or replace table menu_taget as 
+select * from menu_staging where 1=2;
+
+ALTER TABLE menu_taget
+ADD COLUMN ingredients ARRAY,
+is_dairy_free_flag STRING,
+is_gluten_free_flag STRING,
+is_healthy_flag STRING,
+ is_nut_free_flag STRING;
+ 
+ALTER TABLE menu_taget
+ drop column MENU_ITEM_HEALTH_METRICS_OBJ;
+
+insert into menu_taget
+select 
+m.* EXCLUDE (menu_item_health_metrics_obj),
+f.value:ingredients:: array as ingredients,
+f.value:is_dairy_free_flag::string as is_dairy_free_flag,
+f.value:is_gluten_free_flag::string as is_gluten_free_flag,
+f.value:is_healthy_flag::string as is_healthy_flag,
+f.value:is_nut_free_flag::string as is_nut_free_flag
+from
+MENU_STAGING m,
+LATERAL FLATTEN(input=>m.menu_item_health_metrics_obj:menu_item_health_metrics 
+-- ,MODE => 'ARRAY'
+-- ,RECURSIVE => TRUE
+) f
+-- WHERE m.MENU_ID=10001 
+
+select * from menu_taget;
+
+drop table menu_taget;
+drop table menu_staging;
+drop table menu_temp;
+drop table raw_data;
