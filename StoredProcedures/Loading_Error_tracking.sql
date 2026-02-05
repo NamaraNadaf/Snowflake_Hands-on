@@ -1,3 +1,79 @@
+-- 1. You upload files → Stage updates
+-- 2. Directory Table captures file metadata
+-- 3. Stream logs new files
+-- 4. Task triggers stored procedure
+-- 5. SP loads only new, unprocessed files
+-- 6. Log table records ingestion status
+-- 7. No reprocessing happens
+-- 8. No truncation issues ever (directory table is system‑managed)
+
+-- Directory Tables
+-- A Directory Table is metadata about files stored inside an Internal Named Stage.
+-- It stores:
+-- File name
+-- File size
+-- MD5 checksum
+-- Last modified time
+-- Status (ready / loading / error)
+
+-- A Stream on a Directory Table tracks:
+
+-- Newly added files
+-- Modified files
+-- Removed files
+
+use database DB_DEV_N01;
+
+create or replace schema DB_DEV_N01.RAW;
+USE SCHEMA DB_DEV_N01.RAW
+
+CREATE OR REPLACE STAGE ingest_stage
+  DIRECTORY = (ENABLE = TRUE);
+
+
+-- CREATE OR REPLACE DIRECTORY TABLE ingest_dir_tbl
+-- AS
+-- SELECT * FROM DIRECTORY(@ingest_stage)
+
+
+CREATE OR REPLACE STREAM ingest_dir_stream
+ON DIRECTORY(@ingest_stage);
+
+CREATE OR REPLACE TABLE RAW.EMP_DATA (
+  EMP_ID        NUMBER,
+  EMP_NAME      STRING,
+  DEPARTMENT    STRING,
+  EMAIL_ID      STRING
+);
+
+
+truncate  RAW.EMP_DATA;
+truncate RAW.FILE_INGEST_LOG 
+
+CREATE OR REPLACE TABLE RAW.FILE_INGEST_LOG (
+  FILE_NAME     STRING,
+  LOAD_TS       TIMESTAMP,
+  STATUS        STRING
+);
+
+
+CREATE OR REPLACE FILE FORMAT csvfmt
+TYPE='CSV',
+SKIP_HEADER=1,
+FIELD_DELIMITER=',';
+
+
+
+CREATE OR REPLACE TASK RAW.TASK_FILE_INGESTION
+WAREHOUSE = COMPUTE_WH
+SCHEDULE = '5 MINUTE'
+WHEN SYSTEM$STREAM_HAS_DATA('ingest_dir_stream')
+AS
+  call DB_DEV_N01.RAW.SP_INGEST_FILES('DB_DEV_N01','RAW');
+
+---alter task RAW.TASK_FILE_INGESTION suspend;
+
+
 CREATE OR REPLACE PROCEDURE DB_DEV_N01.RAW.SP_INGEST_FILES( db string,sch string)
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -86,6 +162,7 @@ END IF;
    RETURN 'Ingestion completed. Files processed = ' || v_count;
 
  END;
+
 
 
 
